@@ -1,0 +1,7 @@
+﻿*.vmdk
+*.vmx
+*.ova
+*.ovf
+*.iso
+*.log
+.vagrant/
