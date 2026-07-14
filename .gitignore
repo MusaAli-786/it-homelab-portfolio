@@ -5,3 +5,5 @@
 *.iso
 *.log
 .vagrant/
+
+notes.md
