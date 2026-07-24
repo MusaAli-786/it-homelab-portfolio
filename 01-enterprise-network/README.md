@@ -52,11 +52,12 @@ A segmented enterprise network built in VMware Workstation Pro, isolating traffi
    - **Guest → blocked from everything**, including DC01's own Guest-side interface (an inbound filter on the Guest interface, dropping all traffic sourced from 10.10.40.0/24 regardless of destination).
    - **Workstations → Servers: allowed** (required for Project 2's Active Directory to function).
    - **Workstations → Management: blocked** (an outbound filter on the Management interface, since this traffic arrives via the Workstations interface and only needs blocking as it exits toward Management — an inbound filter on Management alone does not catch traffic merely passing through).
-     
+   - **Management → everywhere: allowed by default** (no restrictions added, matching the IT admin network's need for broad access).
+   
    ![Outbound filter fix on Management interface](screenshots/firewall-outbound-fix.png.png)
    ![Workstations blocked from Management — proof](screenshots/ping-blocked-management.png.png)
    
-   - **Management → everywhere: allowed by default** (no restrictions added, matching the IT admin network's need for broad access).
+   
 10. **Validated every rule** by reassigning the same test VM between VMnets and re-running targeted ping tests for each path (Guest→Servers blocked, Guest→own gateway blocked, Workstations→Servers allowed, Workstations→Management blocked).
 
 ## Problems Encountered & Fixes
