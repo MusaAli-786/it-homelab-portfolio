@@ -8,7 +8,7 @@ A segmented enterprise network built in VMware Workstation Pro, isolating traffi
 
 ![Cross-VLAN traffic flow](diagrams/cross_vlan_email_path.svg)
 
-![VMware virtual network configuration](screenshots/vmnet-configuration.png)
+![VMware virtual network configuration](screenshots/vmnet-configuration.png.png)
 
 ## Objectives
 - Design a realistic private IP addressing scheme across 4 network segments
@@ -39,20 +39,25 @@ A segmented enterprise network built in VMware Workstation Pro, isolating traffi
 4. **Matched each adapter to its correct VMnet** using MAC address cross-referencing (`Get-NetAdapter` in Windows vs. each adapter's Advanced settings in VMware), then renamed adapters to self-documenting names (e.g. "Servers-VMnet2") to avoid ever repeating that exercise.
 5. **Assigned static IPs** to all 4 adapters matching the design (10.10.10.1, 10.10.20.1, 10.10.30.1, 10.10.40.1), each with subnet mask 255.255.255.0 and no default gateway (since DC01 itself is the gateway for each subnet).
 6. **Installed and configured RRAS** via Server Manager's Remote Access role, enabled through Custom Configuration → LAN Routing.
-![RRAS network interfaces](screenshots/rras-interfaces.png)
+![RRAS network interfaces](screenshots/rras-interfaces.png.png)
 7. **Built a throwaway test VM** (Ubuntu Server, single adapter, reassignable between VMnets) specifically to validate the design from an ordinary endpoint's perspective rather than testing from DC01 itself.
 8. **Proved routing works** with two ping tests: a same-subnet ping (ttl=128, 0 hops) confirming basic connectivity, and a cross-subnet ping to a network the test VM had zero direct connection to (ttl=127, 1 hop) — proof DC01 was genuinely forwarding traffic between isolated VLANs, not just that the individual networks were up.
-![Same-subnet ping success](screenshots/ping-same-subnet.png)
 
-   ![Cross-subnet ping success](screenshots/ping-cross-subnet.png)
+   
+![Same-subnet ping success](screenshots/ping-same-subnet.png.png)
+![Cross-subnet ping success](screenshots/ping-cross-subnet.png.png)
+
+
 9. **Implemented firewall policy using RRAS IP Packet Filters** (not the standard Windows Defender Firewall GUI, which does not filter transit/routed traffic — only traffic to/from the local host):
    - **Guest → blocked from everything**, including DC01's own Guest-side interface (an inbound filter on the Guest interface, dropping all traffic sourced from 10.10.40.0/24 regardless of destination).
    - **Workstations → Servers: allowed** (required for Project 2's Active Directory to function).
    - **Workstations → Management: blocked** (an outbound filter on the Management interface, since this traffic arrives via the Workstations interface and only needs blocking as it exits toward Management — an inbound filter on Management alone does not catch traffic merely passing through).
-   ![Outbound filter fix on Management interface](screenshots/firewall-outbound-fix.png)
-
-   ![Workstations blocked from Management — proof](screenshots/ping-blocked-management.png)
    - **Management → everywhere: allowed by default** (no restrictions added, matching the IT admin network's need for broad access).
+   
+   ![Outbound filter fix on Management interface](screenshots/firewall-outbound-fix.png.png)
+   ![Workstations blocked from Management — proof](screenshots/ping-blocked-management.png.png)
+   
+   
 10. **Validated every rule** by reassigning the same test VM between VMnets and re-running targeted ping tests for each path (Guest→Servers blocked, Guest→own gateway blocked, Workstations→Servers allowed, Workstations→Management blocked).
 
 ## Problems Encountered & Fixes
