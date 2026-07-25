@@ -20,19 +20,19 @@ centralized identity management, Group Policy, and proper permission delegation.
 
 **Screenshots:**
 
-![Promotion wizard review options](screenshots/01-adds-wizard-review-options)
+![Promotion wizard review options](screenshots/01-adds-wizard-review-options.png)
 
-![ADUC - corp.local domain tree](screenshots/02-aduc-corp-local-tree)
+![ADUC - corp.local domain tree](screenshots/02-aduc-corp-local-tree.png)
 
-![CORP\Administrator login](screenshots/03-corp-administrator-login)
+![CORP\Administrator login](screenshots/03-corp-administrator-login.png)
 
-![DC01 registered as Domain Controller](screenshots/04-aduc-domain-controllers-dc01)
+![DC01 registered as Domain Controller](screenshots/04-aduc-domain-controllers-dc01.png)
 
 **Verification:**
 
-![Get-Service health check](screenshots/05-get-service-health-check)
+![Get-Service health check](screenshots/05-get-service-health-check.png)
 
-![Functional verification - ADWS/WinRM](screenshots/06-functional-verification)
+![Functional verification - ADWS/WinRM](screenshots/06-functional-verification.png)
 
   ### Problems Encountered & Fixes
 **dcdiag flagged SystemLog test failures (ADWS/WinRM) after DC promotion**
