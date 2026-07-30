@@ -93,3 +93,45 @@ centralized identity management, Group Policy, and proper permission delegation.
 - Root cause: typed `CORP/Administrator` (forward slash) instead of the
   required `CORP\Administrator` (backslash) domain-login format
 - Corrected the format; login succeeded, confirmed via `whoami`
+
+### OUs, Security Groups, and Service Accounts
+
+- Designed a departmental OU structure: `Departments` (containing IT, Sales,
+  Marketing, Finance), a separate `Management` OU, and an isolated
+  `Service Accounts` OU — kept separate from regular users per AD best
+  practice, since service accounts warrant different policies (e.g. no
+  interactive logon, different password rules) than human accounts
+- Created matching security groups per department, plus a dedicated
+  `Helpdesk-Group` (inside IT) to set up upcoming delegation of limited
+  admin rights
+- Created 2 service accounts (`svc-backup`, `svc-wazuh`) with
+  "Password never expires" intentionally enabled — a deliberate setting for
+  non-interactive accounts, not a security shortcut, since a service account
+  has no person available to respond to a password-expiry prompt
+
+**Screenshots:**
+
+![OU structure](screenshots/14-aduc-ou-structure-complete.png)
+
+![Finance-Group](screenshots/15-finance-group.png)
+
+![IT-Group and Helpdesk-Group](screenshots/16-it-helpdesk-groups.png)
+
+![Management-Group](screenshots/17-management-group.png)
+
+![Sales-Group](screenshots/18-sales-group.png)
+
+![Marketing-Group](screenshots/19-marketing-group.png)
+
+![Service accounts created](screenshots/20-service-accounts-created.png)
+
+### Problems Encountered & Fixes
+
+**Accidentally created an OU nested in the wrong location, couldn't delete it**
+- Attempted to delete a misplaced `Service Accounts` OU (nested under
+  Departments instead of the domain root) — got an "Access is denied" error
+  despite being logged in as domain Administrator
+- Root cause: AD's built-in "Protect object from accidental deletion" setting,
+  checked by default on every OU — not an actual permissions issue
+- Fix: enabled View → Advanced Features in ADUC, unchecked the protection
+  flag on the Object tab, deleted and recreated the OU correctly
