@@ -135,3 +135,63 @@ centralized identity management, Group Policy, and proper permission delegation.
   checked by default on every OU — not an actual permissions issue
 - Fix: enabled View → Advanced Features in ADUC, unchecked the protection
   flag on the Object tab, deleted and recreated the OU correctly
+
+  ### Group Policy Objects (GPOs)
+
+- **Domain Password Policy** — linked to the domain root (`corp.local`), since
+  default domain password policy can only be set at the domain level, not an
+  individual OU. Configured: 10-character minimum, complexity required,
+  90-day max age, 5-password history
+- **Disable USB Storage** — Computer Configuration Policy, linked to the IT OU.
+  A security control (not a Preference), since it must be enforced and
+  non-reversible by a local user
+- **Map IT Shared Drive** — User Configuration Preference, linked to the IT
+  OU. Maps `\\DC01\IT-Shared` to `Z:`. Built as a Preference rather than a
+  Policy since it's a convenience setting, not a security boundary — users
+  can remap/remove it without Group Policy fighting the change
+- Created a shared folder on DC01 (`C:\Shares\IT-Shared`) to support the
+  drive-mapping GPO, scoped to Everyone: Read/Write for lab simplicity (in
+  production this would be scoped to a specific security group instead)
+- Moved WS01 from the default Computers container into the IT OU, then ran
+  `gpupdate /force` to apply the new OU's linked policies
+- Verified all three GPOs via `gpresult /r`: Password Policy and USB
+  restriction confirmed under Computer Settings; Map IT Shared Drive
+  confirmed under User Settings (after testing with a proper IT-OU test user
+  rather than the built-in Administrator account — see Problems Encountered)
+- Verified the mapped drive visually: `Z: (IT-Shared)` appeared in File
+  Explorer
+
+**Screenshots:**
+
+![Domain Password Policy linked at corp.local root](screenshots/29-gpo-domain-password-policy-linked.png)
+
+![Password Policy GPO settings](screenshots/21-gpo-password-policy-settings.png)
+
+![USB Storage restriction GPO setting](screenshots/22-gpo-usb-restriction-settings.png)
+
+![DC01 shared folder configuration](screenshots/23-dc01-shared-folder-config.png)
+
+![DC01 share permissions (Everyone: Read/Write)](screenshots/24-dc01-share-permissions.png)
+
+![Map IT Shared Drive - Drive Maps configuration](screenshots/30-gpo-mapped-drive-settings.png)
+
+![gpupdate /force success on WS01](screenshots/25-ws01-gpupdate-success.png)
+
+![gpresult - Computer Settings, 3 GPOs applied](screenshots/26-gpresult-computer-settings.png)
+
+![gpresult - User Settings, Map IT Shared Drive applied](screenshots/27-gpresult-user-settings-testuser.png)
+
+![Z: drive mapped in File Explorer](screenshots/28-ws01-z-drive-mapped.png)
+
+### Problems Encountered & Fixes
+
+**Map IT Shared Drive GPO didn't apply when tested as Administrator**
+- `gpresult` showed "N/A" for User Settings when logged in as
+  `CORP\Administrator`, despite WS01 (the computer) being correctly moved
+  into the IT OU
+- Root cause: User Configuration GPOs apply based on the logged-in *user's*
+  OU placement, independent of the computer's OU — Administrator lives in
+  the default Users container, not IT
+- Fix: created a real test user (`tuser`) inside the IT OU; `gpresult`
+  confirmed the GPO applied correctly for that account, and the Z: drive
+  appeared as expected
