@@ -1,6 +1,6 @@
 # Project 1 — Multi-Subnet Enterprise Network (v2)
 
-> **Status: In progress.** Design, virtual networks, and DC01 build are complete. RRAS routing, connectivity testing, and firewall policy are being added next.
+> **Status: Complete.** Design, virtual networks, DC01 build, RRAS routing, firewall policy, and validation of every rule are done.
 >
 > This is a from-scratch rebuild (v2) done after earning CompTIA Network+. The original build is preserved under the `v1-archive` tag of this repository.
 
@@ -22,8 +22,9 @@ A segmented enterprise network built in VMware Workstation Pro, isolating traffi
 ## Tools & Technologies
 - VMware Workstation Pro (host-only virtual networking)
 - Windows Server 2022 Standard (Desktop Experience)
-- RRAS — Routing and Remote Access Service *(upcoming)*
-- RRAS IP Packet Filters *(upcoming)*
+- RRAS — Routing and Remote Access Service
+- RRAS IP Packet Filters (per-interface, inbound and outbound)
+- Ubuntu Server (throwaway test VMs for validation)
 - draw.io (network diagram)
 
 ## IP Addressing Scheme
@@ -98,21 +99,143 @@ Rename-Computer -NewName "DC01" -Restart
 
 ![Hostname confirmed](screenshots/06-dc01-hostname.png)
 
-### 7. Install and configure RRAS *(upcoming)*
-### 8. Prove routing with a test VM *(upcoming)*
-### 9. Implement firewall policy with RRAS packet filters *(upcoming)*
-### 10. Validate every rule *(upcoming)*
+### 7. Install and configure RRAS
+Installed the **Remote Access** role with the **Routing** role service through Server Manager. Installing the role only adds the software, so RRAS was then enabled in the **Routing and Remote Access** console: right-click DC01 → *Configure and Enable Routing and Remote Access* → **Custom configuration** → **LAN routing** → start the service.
+
+The why: until RRAS is enabled, Windows receives a packet on one interface that is addressed to another network and simply drops it. Enabling RRAS turns on IP forwarding, which is what makes DC01 a router.
+
+![RRAS enabled with all four interfaces](screenshots/07-rras-enabled.png)
+
+### 8. Prove routing with test VMs
+Testing from DC01 only proves it can reach its own interfaces. To prove it forwards traffic between segments, two throwaway Ubuntu Server VMs were placed on different networks, each using DC01 as its default gateway:
+
+| VM | VMnet | Address | Default gateway |
+|---|---|---|---|
+| TestVM-Workstations | VMnet3 | 10.10.20.50/24 | 10.10.20.1 |
+| TestVM-Servers (full clone) | VMnet2 | 10.10.10.50/24 | 10.10.10.1 |
+
+There is no DHCP on these networks, so both VMs use static addresses.
+
+![TestVM-Workstations hardware](screenshots/08-testvm-workstations-settings.png)
+
+**Same-subnet test.** The first ping from TestVM-Workstations to DC01's interface (10.10.20.1) failed with 100% packet loss:
+
+![Ping to DC01 failing](screenshots/09-ping-same-subnet-blocked.png)
+
+`ip neigh show 10.10.20.1` showed DC01's MAC address, so ARP (Layer 2) was working and only ICMP was being dropped. Windows Server blocks inbound ping by default, so the echo-request rule was enabled on DC01:
+
+```powershell
+Enable-NetFirewallRule -DisplayName "File and Printer Sharing (Echo Request - ICMPv4-In)"
+```
+
+![ICMP echo rule enabled](screenshots/10-dc01-icmp-rule-enabled.png)
+
+The ping then succeeded with `ttl=128`, the default for Windows:
+
+![Same-subnet ping success](screenshots/11-ping-same-subnet-success.png)
+
+**Cross-subnet test.** From TestVM-Workstations, pinged TestVM-Servers on a network it has no direct connection to:
+
+```bash
+ping -c 4 10.10.10.50
+```
+
+The replies came back with `ttl=63`. Linux starts at 64, and DC01 decremented it by 1 as it routed the packet from VMnet3 to VMnet2, so the TTL shows exactly one router hop. That confirms DC01 is forwarding between the isolated segments rather than just answering on its own interfaces.
+
+![Cross-subnet ping success](screenshots/12-ping-cross-subnet.png)
+### 9. Implement the firewall policy with RRAS packet filters
+Routing makes communication *possible*; policy decides what is *allowed*. Windows Defender Firewall only filters traffic to and from the host itself, not traffic DC01 is routing between networks, so the policy is enforced with **RRAS IP packet filters**. These are applied per interface and per direction.
+
+| Source | Destination | Policy |
+|---|---|---|
+| Guest | Anything | Blocked |
+| Workstations | Servers | Allowed |
+| Workstations | Management | Blocked |
+| Management | Everywhere | Allowed |
+
+Each rule was tested **before** and **after** applying the filter, so any change in behavior could be attributed to the filter.
+
+**Rule 1: Guest blocked from everything.** TestVM-Workstations was temporarily moved onto the Guest network (10.10.40.50) and confirmed able to reach a Servers VM at 10.10.10.50 with no policy in place:
+
+![Guest baseline ping](screenshots/13-guest-baseline-ping.png)
+
+An **inbound filter** was then added on the Guest-VMnet5 interface: source `10.10.40.0/24`, any destination, any protocol, with the action "Receive all packets except those that meet the criteria below." Anything arriving from the Guest network is dropped before a routing decision is made.
+
+![Guest inbound filter](screenshots/14-guest-inbound-filter.png)
+
+Pings from Guest to the Servers VM (10.10.10.50) and to DC01's own Guest interface (10.10.40.1) both failed:
+
+![Guest pings blocked](screenshots/15-guest-ping-blocked.png)
+
+**Rules 2 and 4: Workstations → Servers and Management → everywhere.** These are allowed by default, so no filter is needed. They were verified during validation (step 10).
+
+**Rule 3: Workstations blocked from Management.** The first attempt was an *inbound* filter on the Management interface with source `10.10.20.0/24`. It did not block anything, and the ping still succeeded:
+
+![First attempt: inbound filter did not block](screenshots/16-workstations-management-baseline.png)
+
+A ping from Workstations enters DC01 on the **Workstations** interface and leaves through the **Management** interface. An inbound filter on Management only inspects packets arriving *from* the Management network, so this traffic never matched it. The filter belongs on the Management interface in the **outbound** direction, where the packet exits toward Management.
+
+A simple outbound filter (drop source `10.10.20.0/24`) blocked Workstations → Management, but it also broke **Management → Workstations**. RRAS packet filters are **stateless**: they have no memory of who started a conversation. Workstations' *replies* to a ping from Management are also sourced from `10.10.20.0/24` and leave through the Management interface, so the filter dropped them as well.
+
+The final version uses an **allow-list** on the Management interface's outbound filters, with the action "Drop all packets except those that meet the criteria below":
+
+| Entry | Source | Protocol | Purpose |
+|---|---|---|---|
+| 1 | 10.10.10.0/24 (Servers) | Any | Traffic from Servers |
+| 2 | 10.10.30.0/24 (Management) | Any | DC01's own and Management traffic |
+| 3 | 10.10.20.0/24 (Workstations) | TCP [established] | Replies on TCP connections Management started |
+| 4 | 10.10.20.0/24 (Workstations) | ICMP type 0 | Ping *replies* from Workstations |
+
+Anything else from Workstations, including ping requests and new TCP connections, is dropped by default.
+
+![Management outbound filter (allow-list)](screenshots/17-workstations-management-filter.png)
+
+With the allow-list in place, pings from Workstations to Management failed, while pings from Management to Workstations continued to succeed:
+
+![Management to Workstations still allowed](screenshots/19-management-to-workstations-allowed.png)
+
+### 10. Validate every rule
+The same test VMs were moved between VMnets (adapter changed in VMware, address and gateway updated in netplan) to test each path.
+
+| Path | Expected | Result | Evidence |
+|---|---|---|---|
+| Guest → Servers | Blocked | Blocked | `15-guest-ping-blocked.png` |
+| Guest → DC01 Guest interface | Blocked | Blocked | `15-guest-ping-blocked.png` |
+| Workstations → Servers | Allowed | Allowed (`ttl=63`) | `20-workstations-servers-allowed.png` |
+| Workstations → Management | Blocked | Blocked | Observed during testing (no screenshot) |
+| Management → Workstations | Allowed | Allowed (`ttl=63`) | `19-management-to-workstations-allowed.png` |
+| Management → Servers | Allowed | Allowed (`ttl=63`) | `21-management-servers-allowed.png` |
+
+![Workstations to Servers allowed](screenshots/20-workstations-servers-allowed.png)
+
+![Management to Servers allowed](screenshots/21-management-servers-allowed.png)
+
+### Known limitations
+- **The filters are stateless.** The "TCP [established]" match only checks that the ACK flag is set, so it approximates connection tracking and can be spoofed with crafted packets. UDP replies from Workstations to Management are dropped because UDP has no way of being marked as a reply.
+- **Management → Guest was not tested.** The Guest inbound filter also drops anything Guest sends back, so replies from Guest are expected to be blocked for the same reason.
+- A stateful firewall removes these limits. This is a main reason Project 5 moves to pfSense.
 
 ## Problems Encountered & Fixes
 - **VMware wizard detected the wrong operating system.** The New Virtual Machine wizard remembered the Windows 11 ISO from the previous build and labelled the new VM "Windows 11 x64," with the wrong name and folder. Fixed by choosing *I will install the operating system later*, setting the guest OS to Windows Server 2022, and attaching the Server 2022 ISO afterward in the hardware settings.
 - **Windows adapter order did not match VMware adapter order.** `Get-NetAdapter` listed the adapters in a different order from the VMware adapter numbering, so counting down the list would have mapped them to the wrong segments. MAC address matching resolved it, and the adapters were renamed immediately to avoid repeating the exercise.
+- **Same-subnet ping to DC01 failed with 100% packet loss.** The static address and default route on the test VM were correct, and `ip neigh` showed DC01's MAC address, which ruled out a Layer 1/2 problem. The cause was DC01's own Windows firewall, which blocks inbound ICMP echo by default. Fixed by enabling the "File and Printer Sharing (Echo Request - ICMPv4-In)" rule. This rule only affects traffic addressed to DC01 itself; policy for traffic routed *between* segments is handled separately by RRAS packet filters.
+- **Default gateway appeared to clear in the Ubuntu installer's network screen.** After entering the gateway and reopening the interface settings, the field looked empty. Verified after installation with `ip route` that the default route via 10.10.20.1 was in place before continuing.
+- **Cloned VM failed to apply its new network config.** `netplan apply` returned "Cannot find unique matching interface for ens33." The installer had pinned the config to the original VM's MAC address with a `match: macaddress` block, and the clone received a new MAC from VMware. Fixed by removing the `match` and `set-name` lines so the config applies by interface name, then confirming the new address with `ip -br a`.
+- **First firewall rule for Workstations → Management silently failed to block traffic.** The filter was configured as an *inbound* filter on the Management interface, but the ping arrives on the Workstations interface and only exits through Management, so the filter never saw it. Fixed by moving it to an *outbound* filter on the Management interface.
+- **The outbound filter then broke Management → Workstations.** RRAS packet filters are stateless, so Workstations' replies to Management-initiated traffic were dropped by the same filter. Fixed by replacing the block-list with an allow-list that explicitly permits Workstations' TCP replies and ICMP echo replies.
 
 ## Key Takeaways / Skills Demonstrated
-*(To be completed when the project is finished.)*
 - Private IP addressing design (RFC 1918) and subnetting across multiple segments
 - Layer 2 segmentation with isolated virtual switches versus Layer 3 addressing and gateways
 - Identifying network interfaces by MAC address and documenting an interface-to-segment mapping
 - Building a multi-homed Windows Server for routing
+- Proving a packet crossed a router using TTL (64 → 63 for Linux-to-Linux, 128 for a direct Windows reply)
+- Separating Layer 2 problems (ARP, checked with `ip neigh`) from Layer 3 and ICMP problems when troubleshooting
+- Configuring static addressing and a default route on Ubuntu with netplan
+- Understanding the distinction between routing (making communication possible) and firewall policy (deciding what is allowed)
+- Diagnosing inbound versus outbound packet filter direction by tracing which interface a packet enters and which it exits
+- Recognizing the limits of stateless filtering, and using an allow-list to work around them
+- Testing each rule with a before-and-after comparison rather than assuming a configuration works
 
 ## Current Scope Note
-True 802.1Q VLAN tagging is not used here. VMware Workstation does not support VLAN trunking, so this design uses four separate virtual switches rather than one trunked switch. Real VLAN tagging will be implemented in Project 5 using pfSense.
+True 802.1Q VLAN tagging is not used here. VMware Workstation does not support VLAN trunking, so this design uses four separate virtual switches rather than one trunked switch. Real VLAN tagging will be implemented in Project 5 using pfSense, which will also replace these stateless packet filters with a stateful firewall.
