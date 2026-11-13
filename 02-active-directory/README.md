@@ -18,7 +18,7 @@ The network underneath this project is the one built in Project 1. DC01 is both 
 |---|---|
 | Domain | `corp.local` (NetBIOS `CORP`), functional level Windows Server 2016 |
 | Domain controller | DC01, `10.10.10.1` (Servers segment), AD DS + DNS |
-| Client | WS01, Windows 11 Pro, `10.10.20.50/24` on Workstations (VMnet3), gateway and DNS `10.10.20.1` (DC01's Workstations NIC) |
+| Client | WS01, Windows 11 Pro, `10.10.20.50/24` on Workstations (VMnet3), gateway `10.10.20.1` (DC01's Workstations NIC), DNS `10.10.10.1` (DC01's Servers address, see step 3) |
 | Share | `\\DC01\IT` (`C:\Shares\IT`) |
 
 ## Objectives
@@ -72,13 +72,15 @@ Get-ADDomain | Select-Object Name, DNSRoot, DomainMode
 
 ### 3. Fix DNS for a multi-homed domain controller
 
-DC01 has four network cards, and a domain controller registers a DNS record for every IP it has. Left alone, `DC01.corp.local` would resolve to four addresses, and a client could be handed one on a segment it can't reach. The Workstations, Management and Guest NICs were set not to register in DNS, and the stale A records were deleted from the `corp.local` zone, leaving only `10.10.10.1`. The `_msdcs`, `_sites`, `_tcp` and `_udp` folders were left untouched because AD uses those records to locate the domain controller.
+DC01 has four network cards, and a domain controller registers a DNS record for every IP it has. Left alone, `DC01.corp.local` would resolve to four addresses, and a client could be handed one on a segment it can't reach. The Workstations, Management and Guest NICs were set not to register in DNS, and the stale A records were deleted from the `corp.local` zone, leaving only `10.10.10.1`. Turning off registration on the NICs was not enough on its own: the DNS Server service listens on every address and kept re-registering them (found in Project 3, when a Linux DNS server forwarding to DC01 got four IPs back). The DNS server was restricted to listen only on `10.10.10.1`, which is why clients must use that address as their DNS server. The `_msdcs`, `_sites`, `_tcp` and `_udp` folders were left untouched because AD uses those records to locate the domain controller.
 
 ```powershell
 Set-DnsClient -InterfaceAlias "Workstations-VMnet3" -RegisterThisConnectionsAddress $false
 Set-DnsClient -InterfaceAlias "Management-VMnet4" -RegisterThisConnectionsAddress $false
 Set-DnsClient -InterfaceAlias "Guest-VMnet5" -RegisterThisConnectionsAddress $false
 Get-DnsClient | Select-Object InterfaceAlias, RegisterThisConnectionsAddress
+dnscmd /ResetListenAddresses 10.10.10.1
+Restart-Service DNS
 ```
 
 ![DNS registration off](screenshots/10-dns-registration-off.png)
@@ -87,11 +89,11 @@ Get-DnsClient | Select-Object InterfaceAlias, RegisterThisConnectionsAddress
 
 ### 4. Build WS01 and test the network before joining
 
-WS01 is a Windows 11 Pro VM on VMnet3 (Workstations): 2 vCPU, 4 GB RAM, 60 GB disk, UEFI with a virtual TPM. It has no DHCP, so it was given a static address, with its gateway and DNS pointing at DC01's Workstations NIC. Before joining, connectivity and DNS were tested across the routed segment, so a failed join couldn't be a network problem.
+WS01 is a Windows 11 Pro VM on VMnet3 (Workstations): 2 vCPU, 4 GB RAM, 60 GB disk, UEFI with a virtual TPM. It has no DHCP, so it was given a static address. Its gateway is DC01's Workstations NIC (`10.10.20.1`) and its DNS server is DC01's Servers address (`10.10.10.1`), because the DNS server only listens there (see step 3). Before joining, connectivity and DNS were tested across the routed segment, so a failed join couldn't be a network problem.
 
 ```powershell
 New-NetIPAddress -InterfaceAlias "Ethernet0" -IPAddress 10.10.20.50 -PrefixLength 24 -DefaultGateway 10.10.20.1
-Set-DnsClientServerAddress -InterfaceAlias "Ethernet0" -ServerAddresses 10.10.20.1
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet0" -ServerAddresses 10.10.10.1
 Get-NetIPConfiguration
 ping 10.10.20.1
 nslookup corp.local
@@ -220,7 +222,7 @@ Signed in as `CORP\tuser`, ADUC (`dsa.msc`) was opened and two cases were tested
 
 | Problem | Cause | Fix |
 |---|---|---|
-| DC01 would advertise four IPs in DNS | A domain controller registers every NIC's address, and DC01 has four NICs | Disabled DNS registration on the Workstations, Management and Guest NICs and deleted the stale A records, leaving `10.10.10.1` only. Confirmed with `nslookup corp.local` from WS01 |
+| DC01 would advertise four IPs in DNS | A domain controller registers every NIC's address, and DC01 has four NICs | Disabled DNS registration on the Workstations, Management and Guest NICs and deleted the stale A records. The records later reappeared, because the DNS Server service registers every address it listens on, so DNS was restricted to listen on `10.10.10.1` only (`dnscmd /ResetListenAddresses 10.10.10.1`, then restart DNS). Confirmed only `10.10.10.1` remains after a DNS service restart |
 | Could not add a TPM to the WS01 VM (Finish button greyed out) | VMware requires the VM to be encrypted and use UEFI before it allows a virtual TPM, and Windows 11 needs a TPM | Encrypted the VM (config files only), confirmed UEFI, then added the Trusted Platform Module |
 | Windows 11 setup stuck on "Let's connect you to a network" | Setup requires internet and WS01 is on an isolated segment with DHCP off | At that screen, `Shift+F10` then `oobe\bypassnro` adds an "I don't have internet" option, so a local account can be created |
 | WS01 joined the domain as `DESKTOP-xxxx` instead of `WS01` | The device name entered during setup was not applied | `Rename-Computer -NewName "WS01" -DomainCredential CORP\Administrator -Restart`. A domain-joined rename also updates the computer account in AD, so no leftover object remained |
