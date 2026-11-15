@@ -1,0 +1,12 @@
+$TTL 86400
+@   IN  SOA dns01.lab.local. admin.lab.local. (
+        1       ; serial
+        3600    ; refresh
+        900     ; retry
+        604800  ; expire
+        86400 ) ; negative cache TTL
+@       IN  NS  dns01.lab.local.
+dns01   IN  A   10.10.10.53
+dhcp01  IN  A   10.10.10.67
+ntp01   IN  A   10.10.10.123
+web01   IN  A   10.10.10.80

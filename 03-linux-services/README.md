@@ -63,6 +63,115 @@ flowchart LR
 - [ ] `web01`, resolved by name through `dns01`
 - [ ] Full write-up, screenshots and "Problems Encountered" section
 
+## Build process
+
+### 1. Ubuntu Server template
+
+Building each Linux server from scratch would repeat the same install four times, so one template VM is built once and cloned. The template, `ubuntu-template`, runs Ubuntu Server 26.04 with 1 vCPU and 2 GB RAM. It was built on a **NAT** adapter, because package installs need internet and the lab segments have none. The packages for the planned roles (BIND9, chrony, Nginx) were installed there, and the role services were then **disabled**, so a clone only runs the one service it is meant for. With the VM powered off, a snapshot named `template-ready` was taken to clone from.
+
+![Template hardware](screenshots/01-template-hardware.png)
+![Installer network](screenshots/02-installer-network.png)
+![Packages installed](screenshots/03-packages-installed.png)
+![Template snapshot](screenshots/04-template-snapshot.png)
+
+### 2. Clone `dns01` and put it on the Servers segment
+
+`dns01` is a full clone of `template-ready`. A clone starts with the template's name and network settings, so it was given its own identity while still on NAT (so SSH kept working), then powered off before being moved to the lab network. The static address only works on VMnet2, so applying it on NAT would cut the connection.
+
+```bash
+sudo hostnamectl set-hostname dns01
+sudo sed -i 's/<old-template-name>/dns01/g' /etc/hosts
+```
+
+The network config is in [`configs/dns01/50-cloud-init.yaml`](configs/dns01/50-cloud-init.yaml): static `10.10.10.53/24`, default gateway DC01 (`10.10.10.1`), DNS DC01. After powering off, the adapter was changed to **Custom: Servers - VMnet2** and memory to 1 GB.
+
+![dns01 hardware](screenshots/05-dns01-hardware.png)
+
+The clone booted with no IPv4 address because the installer's `00-installer-config.yaml` was still in `/etc/netplan` (see Problems below). It was moved aside and the config applied:
+
+```bash
+sudo mv /etc/netplan/00-installer-config.yaml /etc/netplan/00-installer-config.yaml.bak
+sudo chmod 600 /etc/netplan/50-cloud-init.yaml
+sudo netplan apply
+ip -br a
+ping -c 4 10.10.10.1
+```
+
+`dns01` shows `10.10.10.53/24` and reaches DC01 with 0% packet loss.
+
+![dns01 address and ping](screenshots/06-dns01-ip-ping.png)
+
+### 3. Configure BIND9 on `dns01`
+
+**BIND9** is the DNS server software. `dns01` is the authoritative server for `lab.local` and forwards `corp.local` questions to DC01. Three files make that up (all in [`configs/dns01/`](configs/dns01/)):
+
+- `named.conf.options` sets BIND to listen only on `10.10.10.53` and localhost, answer only the lab networks (`10.10.0.0/16`), and allow recursion for them only. DNSSEC validation is off because the lab has no internet to validate against.
+- `named.conf.local` declares the zones: `lab.local` as `primary`, and `corp.local` as a `forward only` zone pointing at DC01 (`10.10.10.1`).
+- `db.lab.local` holds the records: `dns01`, `dhcp01`, `ntp01` and `web01`. The records for servers not built yet are included so their names resolve as soon as they exist.
+
+Both the configuration and the zone file were checked before starting the service. No output from `named-checkconf` means the syntax is valid:
+
+```bash
+sudo named-checkconf
+sudo named-checkzone lab.local /etc/bind/db.lab.local
+```
+
+![named-checkzone](screenshots/07-named-checkzone.png)
+
+The service was disabled in the template, so it was enabled and started, then tested with `dig`. The first lookup is answered from the local zone, and the second is forwarded to DC01:
+
+```bash
+sudo systemctl enable --now named
+dig @10.10.10.53 web01.lab.local +short
+dig @10.10.10.53 dc01.corp.local +short
+```
+
+![named running and dig tests](screenshots/08-named-running-dig.png)
+
+### 4. Make DC01 return a single address
+
+The `dc01.corp.local` lookup returned four addresses (one per DC01 NIC), even though the Project 2 cleanup had removed them. Turning off DNS registration on the NICs was not enough: the **DNS Server service** itself registers every address it listens on. DC01's DNS server was restricted to listen only on its Servers address, then the stale records were checked after a service restart:
+
+```powershell
+dnscmd /ResetListenAddresses 10.10.10.1
+Restart-Service DNS
+Get-DnsServerSetting -All | Select-Object -ExpandProperty ListeningIPAddress
+Get-DnsServerResourceRecord -ZoneName corp.local -Name DC01 -RRType A
+```
+
+Only `10.10.10.1` remains after a second restart.
+
+![DC01 DNS records after cleanup](screenshots/09-dc01-dns-records-cleanup.png)
+
+### 5. Conditional forwarder on DC01
+
+The other direction: DC01 has to know where to send `lab.local` questions. A conditional forwarder tells DC01 "for names ending in `lab.local`, ask `dns01`". Without it Windows machines cannot find the Linux servers.
+
+```powershell
+Add-DnsServerConditionalForwarderZone -Name "lab.local" -MasterServers 10.10.10.53
+Get-DnsServerZone -Name lab.local
+Resolve-DnsName web01.lab.local -Server 10.10.10.1
+```
+
+`lab.local` shows as a `Forwarder` zone, and DC01 resolves `web01.lab.local` to `10.10.10.80` through `dns01`.
+
+![DC01 conditional forwarder](screenshots/10-dc01-conditional-forwarder.png)
+
+### 6. Test from WS01 across segments
+
+WS01 sits on the Workstations segment, so this tests the whole chain: WS01 asks DC01, DC01 forwards to `dns01`, and the answer returns. WS01 first failed with a timeout, because it used DC01's Workstations address (`10.10.20.1`) for DNS, and DC01's DNS now only answers on `10.10.10.1`. WS01's DNS server was changed (this needs an elevated PowerShell):
+
+```powershell
+Set-DnsClientServerAddress -InterfaceAlias "Ethernet0" -ServerAddresses 10.10.10.1
+Clear-DnsClientCache
+Resolve-DnsName dc01.corp.local
+Resolve-DnsName web01.lab.local
+```
+
+`dc01.corp.local` resolves to `10.10.10.1` and `web01.lab.local` to `10.10.10.80`.
+
+![WS01 resolves lab.local](screenshots/11-ws01-resolves-lab-local.png)
+
 ## Problems Encountered & Fixes
 
 | Problem | Cause | Fix |
