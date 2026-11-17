@@ -17,7 +17,7 @@ All four Linux servers sit on the **Servers** segment (`10.10.10.0/24`, VMnet2),
 | DC01 | `dc01.corp.local` | `10.10.10.1` | Servers (routes all segments) | Domain controller, DNS for `corp.local`, RRAS router | Built (Projects 1-2) |
 | `dns01` | `dns01.lab.local` | `10.10.10.53` | Servers | BIND9 DNS, authoritative for `lab.local` | Built |
 | `dhcp01` | `dhcp01.lab.local` | `10.10.10.67` | Servers | DHCP server (isc-dhcp-server) for the Workstations segment | Built |
-| `ntp01` | `ntp01.lab.local` | `10.10.10.123` | Servers | NTP time server (chrony) | Planned |
+| `ntp01` | `ntp01.lab.local` | `10.10.10.123` | Servers | NTP time server (chrony) | Built |
 | `web01` | `web01.lab.local` | `10.10.10.80` | Servers | Nginx web server | Planned |
 | WS01 | `ws01.corp.local` | `10.10.20.x` | Workstations | Windows 11 client, domain-joined | Built (Project 2) |
 
@@ -59,7 +59,7 @@ flowchart LR
 - [x] DC01 conditional forwarder for `lab.local`
 - [x] Test from WS01 across segments (`web01.lab.local` and `dc01.corp.local` both resolve)
 - [x] `dhcp01` with a DHCP relay agent on DC01 (test client received `10.10.20.101` through the relay)
-- [ ] `ntp01` with DC01 syncing time from it
+- [x] `ntp01` with DC01 and `dns01` syncing time from it
 - [ ] `web01`, resolved by name through `dns01`
 - [ ] Full write-up, screenshots and "Problems Encountered" section
 
@@ -247,6 +247,48 @@ sequenceDiagram
 The last line in the screenshot is a `DHCPDISCOVER ... via ens33: no free leases` from `dns01`'s MAC address. It is expected: the Ubuntu early-boot environment asks for an address on every card before netplan's static config takes over, and the empty `10.10.10.0` block deliberately gives none.
 
 ![dhcp01 lease log](screenshots/19-dhcp01-lease-log.png)
+
+### 10. NTP server on `ntp01`
+
+**Why:** Kerberos, which AD uses for sign-in, rejects a ticket when the two clocks differ by more than 5 minutes. A lab with no internet needs one internal time source. Time flows from `ntp01` to DC01 (the only domain controller), and from DC01 to domain members.
+
+`ntp01` was cloned from the template the same way as the other servers (hostname, `/etc/hosts`, static `10.10.10.123/24` via [`configs/ntp01/50-cloud-init.yaml`](configs/ntp01/50-cloud-init.yaml), installer netplan file moved aside).
+
+![ntp01 hardware](screenshots/20-ntp01-hardware.png)
+
+![ntp01 address and ping](screenshots/21-ntp01-ip-ping.png)
+
+**Server:** `chrony` is configured in [`configs/ntp01/chrony.conf`](configs/ntp01/chrony.conf). `local stratum 10` makes it hand out its own clock as a reference with no upstream, and `allow 10.10.0.0/16` lets lab clients query it.
+
+```bash
+sudo systemctl restart chrony
+chronyc tracking
+```
+
+![chrony running](screenshots/22-chrony-running.png)
+
+**DC01 (Windows time service)** is pointed at `ntp01` and marked reliable:
+
+```powershell
+w32tm /config /manualpeerlist:"10.10.10.123,0x8" /syncfromflags:manual /reliable:yes /update
+Restart-Service w32time
+w32tm /resync
+w32tm /query /status
+```
+
+DC01 reports source `10.10.10.123`, stratum 11, and the stripchart shows offsets of about 0.0002 s. (The first `/resync` said "no time data available", which is normal for a service that has only just been restarted; the next query showed a good sync.)
+
+![DC01 time source](screenshots/23-dc01-w32tm-source.png)
+
+**`dns01` as a client** uses [`configs/dns01/chrony.conf`](configs/dns01/chrony.conf) (`server 10.10.10.123 iburst`). `chronyc sources -v` shows `^*` (selected source) against `10.10.10.123` and `chronyc tracking` shows stratum 11 and an offset of about 0.0001 s.
+
+![dns01 chrony sources](screenshots/24-dns01-chrony-sources.png)
+
+On `ntp01`, `sudo chronyc clients` lists both DC01 and `dns01`:
+
+![ntp01 clients](screenshots/25-ntp01-clients.png)
+
+**Why stratum 11:** stratum counts hops from a reference clock. `ntp01` is 10, so anything syncing from it is 11, and a domain member syncing from DC01 would be 12.
 
 ## Problems Encountered & Fixes
 
