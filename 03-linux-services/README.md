@@ -16,7 +16,7 @@ All four Linux servers sit on the **Servers** segment (`10.10.10.0/24`, VMnet2),
 |---|---|---|---|---|---|
 | DC01 | `dc01.corp.local` | `10.10.10.1` | Servers (routes all segments) | Domain controller, DNS for `corp.local`, RRAS router | Built (Projects 1-2) |
 | `dns01` | `dns01.lab.local` | `10.10.10.53` | Servers | BIND9 DNS, authoritative for `lab.local` | Built |
-| `dhcp01` | `dhcp01.lab.local` | `10.10.10.67` | Servers | DHCP server | Planned |
+| `dhcp01` | `dhcp01.lab.local` | `10.10.10.67` | Servers | DHCP server (isc-dhcp-server) for the Workstations segment | Built |
 | `ntp01` | `ntp01.lab.local` | `10.10.10.123` | Servers | NTP time server (chrony) | Planned |
 | `web01` | `web01.lab.local` | `10.10.10.80` | Servers | Nginx web server | Planned |
 | WS01 | `ws01.corp.local` | `10.10.20.x` | Workstations | Windows 11 client, domain-joined | Built (Project 2) |
@@ -58,7 +58,7 @@ flowchart LR
 - [x] BIND9 configured: `lab.local` zone, `corp.local` forwarded to DC01
 - [x] DC01 conditional forwarder for `lab.local`
 - [x] Test from WS01 across segments (`web01.lab.local` and `dc01.corp.local` both resolve)
-- [ ] `dhcp01` with a DHCP relay agent on DC01
+- [x] `dhcp01` with a DHCP relay agent on DC01 (test client received `10.10.20.101` through the relay)
 - [ ] `ntp01` with DC01 syncing time from it
 - [ ] `web01`, resolved by name through `dns01`
 - [ ] Full write-up, screenshots and "Problems Encountered" section
@@ -172,6 +172,82 @@ Resolve-DnsName web01.lab.local
 
 ![WS01 resolves lab.local](screenshots/11-ws01-resolves-lab-local.png)
 
+### 7. DHCP server on `dhcp01`
+
+**DHCP** hands out network settings (address, gateway, DNS server) automatically, so devices do not need to be configured by hand. `dhcp01` is another full clone of `template-ready`, built the same way as `dns01`: new hostname, the installer's `00-installer-config.yaml` moved aside, a static `10.10.10.67/24` ([`configs/dhcp01/50-cloud-init.yaml`](configs/dhcp01/50-cloud-init.yaml)) with `dns01` as its DNS server, then moved to **Servers - VMnet2** with 1 GB of RAM.
+
+![dhcp01 hardware](screenshots/12-dhcp01-hardware.png)
+![dhcp01 address and ping](screenshots/13-dhcp01-ip-ping.png)
+
+The scope is in [`configs/dhcp01/dhcpd.conf`](configs/dhcp01/dhcpd.conf):
+
+- A pool of `10.10.20.100` to `10.10.20.200` for the Workstations segment (`10.10.20.0/24`), with `10.10.20.1` (DC01) as the gateway and `10.10.10.1` (DC01) as the DNS server. DC01 answers `corp.local` and forwards `lab.local` to `dns01`.
+- Fixed addresses (such as WS01 at `10.10.20.50`) are kept **outside** the pool so the server can never hand one out twice.
+- An **empty** block for `10.10.10.0/24`, the network `dhcp01` itself is on. The service only listens on a network card if the config describes that card's network. The block has no `range`, so no addresses are given out on the Servers segment.
+
+The service listens on `ens33` (`INTERFACESv4="ens33"` in `/etc/default/isc-dhcp-server`). The config was checked before starting the service, then enabled and started:
+
+```bash
+sudo dhcpd -t -cf /etc/dhcp/dhcpd.conf
+sudo systemctl enable --now isc-dhcp-server
+systemctl status isc-dhcp-server --no-pager
+```
+
+The service log shows it listening on `ens33` for `10.10.10.0/24`.
+
+![isc-dhcp-server running](screenshots/14-dhcpd-running.png)
+
+### 8. DHCP relay agent on DC01
+
+A client asking for an address **broadcasts** its request on its own segment, and routers do not forward broadcasts. `dhcp01` is on the Servers segment, so it would never hear a request from the Workstations segment. The fix is the **DHCP Relay Agent** in Routing and Remote Access on DC01. It listens for the broadcast on the Workstations side and forwards it directly to `dhcp01`, noting which segment it came from so the server picks the matching scope.
+
+In Routing and Remote Access on DC01: IPv4 > General > New Routing Protocol > **DHCP Relay Agent**, then:
+
+1. DHCP Relay Agent > Properties > add the server address `10.10.10.67`.
+2. DHCP Relay Agent > New Interface > **Workstations-VMnet3**, with Relay DHCP packets enabled.
+
+The interface is the network card the relay listens on, so it has to be the one facing the clients.
+
+![Relay agent server address](screenshots/15-dc01-relay-server.png)
+![Relay agent interface](screenshots/16-dc01-relay-interface.png)
+
+### 9. Test: a client on the Workstations segment gets a lease
+
+`TestVM-Workstations` (Ubuntu, VMnet3) was used instead of WS01, which has a fixed address and is domain-joined. The test VM still had a fixed address from the Project 1 tests, so its netplan file was replaced with `dhcp4: true` ([`configs/testvm-workstation/00-installer-config.yaml`](configs/testvm-workstation/00-installer-config.yaml)) and applied with `sudo netplan apply`.
+
+The VM received **`10.10.20.101/24`**, a default route via `10.10.20.1`, and DNS server `10.10.10.1`, all from the scope on `dhcp01`.
+
+![Test VM lease](screenshots/17-testvm-dhcp-lease.png)
+
+`resolvectl query web01.lab.local` on the client returns `10.10.10.80` with those settings, so the client can find the Linux servers by name (see the `.local` note in Problems below).
+
+![Test VM resolves through DHCP-supplied DNS](screenshots/18-testvm-dns-via-dhcp.png)
+
+On `dhcp01` the journal shows the full four-step exchange, and the request arrives **via `10.10.20.1`**, the relay agent on DC01:
+
+```bash
+sudo journalctl -u isc-dhcp-server -n 20 --no-pager
+```
+
+```mermaid
+sequenceDiagram
+    participant C as Test VM (Workstations)
+    participant R as DC01 relay (10.10.20.1)
+    participant D as dhcp01 (10.10.10.67)
+    C->>R: DISCOVER (broadcast)
+    R->>D: DISCOVER (unicast, from 10.10.20.1)
+    D->>R: OFFER 10.10.20.101
+    R->>C: OFFER
+    C->>R: REQUEST
+    R->>D: REQUEST
+    D->>R: ACK
+    R->>C: ACK
+```
+
+The last line in the screenshot is a `DHCPDISCOVER ... via ens33: no free leases` from `dns01`'s MAC address. It is expected: the Ubuntu early-boot environment asks for an address on every card before netplan's static config takes over, and the empty `10.10.10.0` block deliberately gives none.
+
+![dhcp01 lease log](screenshots/19-dhcp01-lease-log.png)
+
 ## Problems Encountered & Fixes
 
 | Problem | Cause | Fix |
@@ -184,6 +260,10 @@ Resolve-DnsName web01.lab.local
 | `dc01.corp.local` returned four IPs when queried through `dns01` | DC01's DNS Server service re-registered every NIC's address after the Project 2 cleanup, even with NIC registration off | Restricted the DNS server to listen only on `10.10.10.1` (`dnscmd /ResetListenAddresses 10.10.10.1`, restart DNS) and confirmed only `10.10.10.1` remained after a second restart |
 | WS01 lookups timed out right after that change | WS01's DNS server was DC01's Workstations address (`10.10.20.1`), which DC01's DNS stopped answering on | `Get-DnsClientServerAddress` on WS01 showed it. Pointed WS01 at `10.10.10.1` with `Set-DnsClientServerAddress -InterfaceAlias "Ethernet0" -ServerAddresses 10.10.10.1` |
 | `Set-DnsClientServerAddress` failed with "Access to a CIM resource was not available" | PowerShell was not elevated; WS01 was signed in as a standard user | Opened PowerShell as administrator and supplied `CORP\Administrator` credentials |
+| `resolvectl query web01.lab.local` on Ubuntu failed with "No appropriate name servers or networks for name found" | `systemd-resolved` treats `*.local` as multicast DNS, which is off on the card, so it never asks the unicast DNS server DHCP gave it. Windows clients are unaffected. It is also one reason `.local` is discouraged for AD domains | `sudo resolvectl domain ens33 '~local'` routes `.local` names to the card's DNS server (runtime only) |
+| The same lookup then returned `SERVFAIL` | DC01 forwards `lab.local` to `dns01`, and `dns01` was powered off | Powered on `dns01`, and the lookup returned `10.10.10.80`. Every server in a forwarding chain has to be up |
+| `dhcp01` logged `DHCPDISCOVER ... via ens33: no free leases` from `dns01`'s MAC | Ubuntu's early-boot network config (`/run/systemd/network/zzzz-dracut-default.network`, `DHCP=yes`) asks for an address before netplan's static config applies. The empty `10.10.10.0` block gives none | Expected and harmless. Found with `sudo grep -ri dhcp /etc/netplan /run/systemd/network/` |
+| Test VM was not asking for DHCP | Its netplan file still held the fixed address from the Project 1 tests | Replaced it with `dhcp4: true` and ran `sudo netplan apply` |
 
 Notes:
 - Do not run `netplan apply` while the VM is on NAT. The static `10.10.10.x` address only works on VMnet2 and it cuts the SSH session. Write the file, power off, switch the adapter, then boot.
