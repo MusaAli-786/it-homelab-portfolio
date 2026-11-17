@@ -1,10 +1,8 @@
 # Project 3: Linux Services Network
 
-![Status](https://img.shields.io/badge/status-in%20progress-yellow)
+![Status](https://img.shields.io/badge/status-complete-brightgreen)
 
 DNS, DHCP, NTP and a web server on Ubuntu Server, joined to the existing Windows environment from Projects 1 and 2. The goal is two DNS servers (Microsoft DNS on DC01, BIND9 on `dns01`) that answer each other's questions, so a Windows client can find a Linux server by name and the other way round.
-
-> Work in progress. Sections are added as each service is built and tested.
 
 ## Quick reference
 
@@ -18,10 +16,10 @@ All four Linux servers sit on the **Servers** segment (`10.10.10.0/24`, VMnet2),
 | `dns01` | `dns01.lab.local` | `10.10.10.53` | Servers | BIND9 DNS, authoritative for `lab.local` | Built |
 | `dhcp01` | `dhcp01.lab.local` | `10.10.10.67` | Servers | DHCP server (isc-dhcp-server) for the Workstations segment | Built |
 | `ntp01` | `ntp01.lab.local` | `10.10.10.123` | Servers | NTP time server (chrony) | Built |
-| `web01` | `web01.lab.local` | `10.10.10.80` | Servers | Nginx web server | Planned |
+| `web01` | `web01.lab.local` | `10.10.10.80` | Servers | Nginx web server | Built |
 | WS01 | `ws01.corp.local` | `10.10.20.x` | Workstations | Windows 11 client, domain-joined | Built (Project 2) |
 
-`lab.local` records for `dhcp01`, `ntp01` and `web01` already exist in the zone file, so the names resolve as soon as those servers are built.
+The `lab.local` records for `dhcp01`, `ntp01` and `web01` were added to the zone file before those servers existed, so each name resolved as soon as its server was built.
 
 ### Two DNS domains
 
@@ -60,8 +58,8 @@ flowchart LR
 - [x] Test from WS01 across segments (`web01.lab.local` and `dc01.corp.local` both resolve)
 - [x] `dhcp01` with a DHCP relay agent on DC01 (test client received `10.10.20.101` through the relay)
 - [x] `ntp01` with DC01 and `dns01` syncing time from it
-- [ ] `web01`, resolved by name through `dns01`
-- [ ] Full write-up, screenshots and "Problems Encountered" section
+- [x] `web01` serving a page, reached from WS01 by name (`web01.lab.local`)
+- [x] Full write-up, screenshots and "Problems Encountered" section
 
 ## Build process
 
@@ -290,6 +288,89 @@ On `ntp01`, `sudo chronyc clients` lists both DC01 and `dns01`:
 
 **Why stratum 11:** stratum counts hops from a reference clock. `ntp01` is 10, so anything syncing from it is 11, and a domain member syncing from DC01 would be 12.
 
+### 11. Web server on `web01`
+
+`web01` was cloned like the other servers (static `10.10.10.80/24` via [`configs/web01/50-cloud-init.yaml`](configs/web01/50-cloud-init.yaml)) with 1 GB of RAM on the Servers segment.
+
+![web01 hardware](screenshots/26-web01-hardware.png)
+
+![web01 address and ping](screenshots/27-web01-ip-ping.png)
+
+Nginx was installed in the template but disabled, so it was enabled and started, then the default page was replaced with one that names the server ([`configs/web01/index.html`](configs/web01/index.html)). Nginx serves `/var/www/html/index.html` by default.
+
+```bash
+sudo systemctl enable --now nginx
+sudo nano /var/www/html/index.html
+curl http://localhost
+```
+
+`curl` is a command-line web client: it sends an HTTP request and prints the reply. Here it proves Nginx works on the server itself.
+
+![Nginx serving the page](screenshots/28-nginx-running.png)
+
+`web01` also syncs time from `ntp01` with the same client config as `dns01` ([`configs/web01/chrony.conf`](configs/web01/chrony.conf)); `chronyc sources -v` shows `^*` on `10.10.10.123`.
+
+![web01 chrony](screenshots/29-web01-chrony.png)
+
+**Final test, from WS01 on another segment:**
+
+```powershell
+Resolve-DnsName web01.lab.local
+curl.exe http://web01.lab.local
+```
+
+`curl.exe` is used because plain `curl` in PowerShell is an alias for `Invoke-WebRequest`. The name resolves to `10.10.10.80` and the page comes back across the router.
+
+![WS01 reaches web01 by name](screenshots/30-ws01-reaches-web01.png)
+
+## How it all works together
+
+```mermaid
+flowchart TB
+    subgraph SRV["Servers segment 10.10.10.0/24 (VMnet2)"]
+        DNS01["dns01 .53<br/>BIND9, lab.local"]
+        DHCP01["dhcp01 .67<br/>DHCP"]
+        NTP01["ntp01 .123<br/>chrony, stratum 10"]
+        WEB01["web01 .80<br/>Nginx"]
+    end
+    DC01["DC01 10.10.10.1<br/>router, AD, DNS, DHCP relay"]
+    subgraph WKS["Workstations segment 10.10.20.0/24 (VMnet3)"]
+        WS01["WS01 / TestVM"]
+    end
+    SRV <--> DC01
+    DC01 <--> WKS
+    NTP01 -.->|time| DC01
+    NTP01 -.->|time| DNS01
+    NTP01 -.->|time| WEB01
+```
+
+A new client on the Workstations segment uses every service in order:
+
+```mermaid
+sequenceDiagram
+    participant C as Client (Workstations)
+    participant R as DC01 (router, relay, DNS)
+    participant H as dhcp01
+    participant D as dns01
+    participant W as web01
+    C->>R: 1. DHCP broadcast
+    R->>H: relayed as unicast
+    H-->>C: 2. address, gateway, DNS 10.10.10.1
+    C->>R: 3. web01.lab.local?
+    R->>D: conditional forwarder for lab.local
+    D-->>C: 4. 10.10.10.80 (via DC01)
+    C->>W: 5. HTTP GET, routed by DC01
+    W-->>C: 6. page
+```
+
+| Service | Provided by | Why it matters |
+|---|---|---|
+| Addresses | `dhcp01`, through the relay on DC01 | Broadcasts do not cross routers, so DC01 forwards them as unicast |
+| Names | DC01 for `corp.local`, `dns01` for `lab.local` | Each server answers for its own domain and forwards the other |
+| Routing | DC01 (RRAS) | Moves traffic between the Servers and Workstations segments |
+| Time | `ntp01`, then DC01, then domain members | Kerberos fails if clocks differ by more than 5 minutes |
+| Content | `web01` (Nginx) | Proves the whole chain works end to end |
+
 ## Problems Encountered & Fixes
 
 | Problem | Cause | Fix |
@@ -306,6 +387,8 @@ On `ntp01`, `sudo chronyc clients` lists both DC01 and `dns01`:
 | The same lookup then returned `SERVFAIL` | DC01 forwards `lab.local` to `dns01`, and `dns01` was powered off | Powered on `dns01`, and the lookup returned `10.10.10.80`. Every server in a forwarding chain has to be up |
 | `dhcp01` logged `DHCPDISCOVER ... via ens33: no free leases` from `dns01`'s MAC | Ubuntu's early-boot network config (`/run/systemd/network/zzzz-dracut-default.network`, `DHCP=yes`) asks for an address before netplan's static config applies. The empty `10.10.10.0` block gives none | Expected and harmless. Found with `sudo grep -ri dhcp /etc/netplan /run/systemd/network/` |
 | Test VM was not asking for DHCP | Its netplan file still held the fixed address from the Project 1 tests | Replaced it with `dhcp4: true` and ran `sudo netplan apply` |
+| `ntp01` clone and `web01` clone kept the template's name in `/etc/hosts` | The template's name had been typed as `ubunutu-template`, so a `sed` using the correct spelling matched nothing (same cause as `dns01`) | Used the exact spelling from `cat /etc/hosts`. The terminal prompt keeps the old name until the next login |
+| First `w32tm /resync` on DC01 said "no time data was available" | The time service had only just been restarted and had not polled `ntp01` yet | Waited a moment and re-ran `w32tm /query /status`: source `10.10.10.123`, stratum 11 |
 
 Notes:
 - Do not run `netplan apply` while the VM is on NAT. The static `10.10.10.x` address only works on VMnet2 and it cuts the SSH session. Write the file, power off, switch the adapter, then boot.
